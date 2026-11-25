@@ -21,6 +21,9 @@
 (*   [S1] sqlite.org/c3ref/open.html: SQLITE_OPEN_READWRITE "opens the     *)
 (*        database for reading and writing if possible, or reading only if *)
 (*        the file is write protected by the operating system".            *)
+(*   [K1] Linux fs/namei.c may_create_in_sticky (protected_regular): an    *)
+(*        O_CREAT open of a file another uid owns in a sticky directory    *)
+(*        is refused whatever its mode; access(2) checks only the mode.    *)
 (*   [S2] sqlite.org/rescode.html SQLITE_READONLY (8): "an attempt is made *)
 (*        to alter some data for which the current database connection     *)
 (*        does not have write permission".                                 *)
@@ -30,8 +33,16 @@
 EXTENDS Naturals
 
 CONSTANTS
-    Check,      \* "none" (Dingo main) or "access" (the fix: check write access first)
-    Writable,   \* TRUE: the process may write metadata.sqlite
+    \* "none" (Dingo main), "access" (access(2) W_OK first), or "sticky"
+    \* (access(2), and also a file another uid owns in a protected sticky
+    \* directory, which access(2) does not see [K1])
+    Check,
+    \* Why the process may not write metadata.sqlite: "none" (it may),
+    \* "mode" (no write bit applies to it), or "sticky" (the bits allow it,
+    \* through fsGroup, but another uid owns the file in a sticky directory
+    \* with protected_regular set, so SQLite's O_CREAT open is refused and it
+    \* falls back to read-only [K1][S1])
+    Cause,
     Pending     \* schema migrations still to run (6 for 68 -> 74)
 
 VARIABLES
@@ -41,6 +52,17 @@ VARIABLES
 
 \* Literally: "vars is defined as the tuple of the three variables."
 vars == <<step, applied, reason>>
+
+\* In English: "The process may write the file."
+\* Literally: "Writable is defined as: Cause equals "none"."
+Writable == Cause = "none"
+
+\* In English: "The pre-start check sees the problem: access(2) sees a
+\* missing write bit; only the "sticky" check also sees the sticky case."
+\* Literally: "Detected is defined as: Check equals "access" and Cause
+\*   equals "mode", or Check equals "sticky" and Cause does not equal
+\*   "none"."
+Detected == (Check = "access" /\ Cause = "mode") \/ (Check = "sticky" /\ Cause # "none")
 
 \* In English: "The node starts with no migration applied."
 \* Literally: "Init is defined as: step equals "precheck", applied equals 0,
@@ -63,8 +85,8 @@ PreCheck ==
 \* migration, which fails as SQLite's read-only error [S1][S2]."
 \* Literally: "Migrate is defined as: step equals "migrate", and: if applied
 \*   equals Pending then step in the next state equals "running" and applied
-\*   and reason are unchanged; else if Check equals "access" and Writable is
-\*   FALSE then step becomes "failed", reason becomes "notWritable", applied
+\*   and reason are unchanged; else if Detected
+\*   then step becomes "failed", reason becomes "notWritable", applied
 \*   unchanged; else if Writable then applied increases by 1 and step and
 \*   reason are unchanged; else step becomes "failed", reason becomes
 \*   "readonly", applied unchanged."
@@ -72,7 +94,7 @@ Migrate ==
     /\ step = "migrate"
     /\ IF applied = Pending
           THEN /\ step' = "running" /\ UNCHANGED <<applied, reason>>
-       ELSE IF Check = "access" /\ ~Writable
+       ELSE IF Detected
           THEN /\ step' = "failed" /\ reason' = "notWritable"
                /\ UNCHANGED applied
        ELSE IF Writable
