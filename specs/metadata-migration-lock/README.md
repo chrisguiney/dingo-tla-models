@@ -18,3 +18,16 @@ Reproduced in Docker with `--user 1000:1000 --read-only --cap-drop ALL --securit
 Dingo test: `TestFileLockerTakesAnExistingLockItCannotWrite`. Fix: local integration branch (the lock file is opened without `O_CREAT` when it exists, read-only if need be, and created 0660 with `O_EXCL` when absent).
 
 Not modelled: SQLite's own opens. With the lock fixed, the same Docker setup fails next with "attempt to write a readonly database", because SQLite opens a `metadata.sqlite` owned by another uid with `O_CREAT` and falls back to read-only. A data directory shared this way needs its files owned by the pod's uid.
+
+## Upgrading a store Dingo cannot write
+
+`MetadataUpgrade.tla` follows the v0.94.2 store (schema 68) through Dingo's two opens: the pre-open check, whose failure is ignored, and the v0.94.2 ledger-state migration. When the process may not write `metadata.sqlite`, SQLite opens it read-only without saying so ([`sqlite3_open_v2`](https://sqlite.org/c3ref/open.html)), and the first migration (version 69) fails with `SQLITE_READONLY` (8), "attempt to write a readonly database". That is the preprod relay-b canary's error.
+
+| Config | Check | Writable | Result |
+| --- | --- | --- | --- |
+| `MetadataUpgradeReadonlyBug.cfg` | none (Dingo main) | no | **fails** `NoMigrationWithoutWriteAccess` |
+| `MetadataUpgradeFixed.cfg` | write access first | no | passes: stops naming the file |
+| `MetadataUpgradeFixedWritable.cfg` | write access first | yes | passes |
+| `MetadataUpgradeWritable.cfg` | none | yes | passes |
+
+Reproduced in Docker with the pod settings, `--storage-mode api` and a v0.94.2 database whose files uid 1000 owns, with `metadata.sqlite` mode `-r--rw-r--` (group-writable through fsGroup, owner read-only). It gives the canary's exact sequence and error. With the fix the node stops at once with "/data/metadata.sqlite is not writable by uid 1000 gid 1000 (mode -r--rw-r--, owner 1000:1000)". Dingo test: `TestUnwritableReleasedStoreStopsBeforeMigrating`.
