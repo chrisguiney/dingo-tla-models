@@ -31,3 +31,15 @@ Not modelled: SQLite's own opens. With the lock fixed, the same Docker setup fai
 | `MetadataUpgradeWritable.cfg` | none | yes | passes |
 
 Reproduced in Docker with the pod settings, `--storage-mode api` and a v0.94.2 database whose files uid 1000 owns, with `metadata.sqlite` mode `-r--rw-r--` (group-writable through fsGroup, owner read-only). It gives the canary's exact sequence and error. With the fix the node stops at once with "/data/metadata.sqlite is not writable by uid 1000 gid 1000 (mode -r--rw-r--, owner 1000:1000)". Dingo test: `TestUnwritableReleasedStoreStopsBeforeMigrating`.
+
+### The canary's actual cause: another uid in a sticky directory
+
+On the relays the files are `-rw-r--r-- dingo:dingo` (1000:1000), but dingo-operator 0.5.0 runs the pod as its legacy user (uid 100, gid 101, fsGroup 101) for any image whose tag is not `major.minor.patch` (`usesLegacyDingoUser`), and the canary's tag `0474faf37-96088e569` is not. The kubelet's fsGroup change makes every file group-writable to 101, so `access(2)` allows writes. But in the sticky `/data` (set by the `data-volume-sticky-bit` init container), with `protected_regular=2`, the kernel refuses each `O_CREAT` open of a file uid 1000 owns. The lock opened with `O_CREAT` gave "permission denied" (the first canary). SQLite's main-file open with `O_CREAT` falls back to read-only, giving "attempt to write a readonly database" (the second canary). Both reproduce byte for byte in Docker with `--user 100:101 --group-add 101`, the pod's mounts and `DINGO_STORAGE_MODE=api`.
+
+| Config | Check | Cause | Result |
+| --- | --- | --- | --- |
+| `MetadataUpgradeStickyBug.cfg` | `access(2)` only | sticky | **fails** `NoMigrationWithoutWriteAccess` |
+| `MetadataUpgradeStickyFixed.cfg` | `access(2)` and the sticky rule | sticky | passes |
+| `MetadataUpgradeStickyFixedMode.cfg` | same | mode | passes |
+
+Dingo test: `TestStickyCreateRefused`. With the fix, the node stops at once: "/data/metadata.sqlite is not writable by uid 100 gid 101 (mode -rw-rw-r--, owner 1000:101): another uid owns it in the sticky directory /data, and fs.protected_regular=2 refuses SQLite's O_CREAT open". The node cannot repair this itself. The pod must run as the uid that owns the data.
