@@ -6,7 +6,8 @@ covered by the gOuroboros models repository and listed here as "upstream".
 | Dingo area | Status | Model |
 | --- | --- | --- |
 | Tx-submission client (`ouroboros/txsubmission.go`) local stop | modelled | `txsubmission-client` |
-| Chain-sync client and jumping (`ouroboros/chainsync.go`, `chainsync/`) | gap | |
+| Chain-sync jumping dynamo stall check (`ouroboros/chainsync_jumping.go` `csjCheckDynamoStall`) | modelled | `chainsync-jumping` |
+| Chain-sync client and jumping, the rest (`ouroboros/chainsync.go`, `chainsync/`) | gap | |
 | Block-fetch client | gap | |
 | Mempool | gap | |
 | Chain selection (`chainselection/`) | gap | |
