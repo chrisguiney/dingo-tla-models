@@ -7,6 +7,7 @@ covered by the gOuroboros models repository and listed here as "upstream".
 | --- | --- | --- |
 | Tx-submission client (`ouroboros/txsubmission.go`) local stop | modelled | `txsubmission-client` |
 | Chain-sync jumping dynamo stall check (`ouroboros/chainsync_jumping.go` `csjCheckDynamoStall`) | modelled | `chainsync-jumping` |
+| Metadata migration lock (`database/plugin/metadata/sqlstore/migrations/lock_file_unix.go`) | modelled | `metadata-migration-lock` |
 | Chain-sync client and jumping, the rest (`ouroboros/chainsync.go`, `chainsync/`) | gap | |
 | Block-fetch client | gap | |
 | Mempool | gap | |
