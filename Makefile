@@ -5,7 +5,7 @@ SHELL := bash
 # is expected to FAIL (a mutation, a known bug, or a reachability probe).
 CONFIGS := $(filter-out %Bug.cfg,$(wildcard specs/*/*.cfg))
 
-.PHONY: help install hello hello-bug txsubmission-client chainsync-jumping models check clean
+.PHONY: help install hello hello-bug txsubmission-client chainsync-jumping metadata-migration-lock models check clean
 
 help: ## Show this list
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  make %-20s %s\n", $$1, $$2}'
@@ -24,6 +24,9 @@ txsubmission-client: ## Check Dingo's tx-submission client under a local stop
 
 chainsync-jumping: ## Check when Dingo replaces a silent chain-sync jumping dynamo
 	@scripts/run-model.sh specs/chainsync-jumping
+
+metadata-migration-lock: ## Check opening the metadata migration lock in a shared directory
+	@scripts/run-model.sh specs/metadata-migration-lock
 
 models: ## Check every config of every model, Bug ones expected to fail
 	@set -e; for d in specs/*/; do scripts/run-model.sh "$${d%/}"; done
