@@ -138,6 +138,7 @@ Plain-language definitions, with a Go comparison where one helps.
 : An ordered list, used for inboxes. `Append(s, x)` adds to the end,
   `Head(s)` is the first element, `Tail(s)` is the rest, `Len(s)` the length,
   `<<>>` the empty one. Also used for tuples. Needs `EXTENDS Sequences`.
+  `s \o t` joins two sequences, like `append(s, t...)` in Go.
 
 **Spec / specification**
 : A TLA+ description of a system. Also the name we give the top-level formula,
