@@ -9,3 +9,4 @@ Local only. Never referenced from anything published.
 | dingo#6782 | `fix/txsize-shelley-framing` | `txsize-framing` | `TxSizeFraming*` |
 | dingo#6775 | `fix/csj-held-dynamo-recycle` | `chainsync-jumping` | `CsjDynamoStall*` |
 | dingo#6655 | `fix/badgerutxo-reward-txn-budget` `da1b0d82b` | `badgerutxo-chunked-apply` | `ChunkedApply*` |
+| (unpublished) | `fix/indexer-direct-deposit-order` | `indexer-fact-copy-order` | `FactCopy*` |

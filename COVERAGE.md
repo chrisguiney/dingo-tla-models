@@ -17,3 +17,4 @@ covered by the gOuroboros models repository and listed here as "upstream".
 | Node lifecycle and shutdown order (`node.go`) | gap | |
 | DMQ node-to-node (`dmq/`) | gap | |
 | Protocols, ledger, consensus as implemented by gOuroboros | upstream | gouroboros-tla-models |
+| IndexerDB fact copy order (`internal/indexer/facts.go`, `writer.go`) for a segment that registers and credits an account | modelled | `indexer-fact-copy-order` |
