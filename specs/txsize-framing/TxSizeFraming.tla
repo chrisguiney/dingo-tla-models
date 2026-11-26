@@ -15,6 +15,9 @@
 (*   [S3] eras/allegra/impl/src/Cardano/Ledger/Allegra/Tx.hs 74 and        *)
 (*        eras/mary/impl/src/Cardano/Ledger/Mary/Tx.hs 71: sizeTxF is      *)
 (*        sizeShelleyTxF in both eras.                                     *)
+(*   [S4] Shelley/Tx.hs 56 and 179-195: the components are decoded under   *)
+(*        Annotator and compared with eqRaw (MemoBytes), so encCBOR in     *)
+(*        [S1] writes each component's received bytes, a tag included.     *)
 (*                                                                         *)
 (* The Dingo code is FromCBOR (internal/txsize/txsize.go). It feeds        *)
 (* TxSizeForFee (ledger/eras/validation.go), mempool admission             *)
@@ -24,16 +27,27 @@
 (* components already, so they are outside this model's change.            *)
 (* When the bytes are not exactly a three-component array, every era       *)
 (* keeps the received length.                                              *)
+(*                                                                         *)
+(* A component may carry a tag in front of its item, e.g. the self-       *)
+(* describe tag 55799 (d9 d9 f7, three bytes). Decoding the outer array    *)
+(* into gOuroboros RawMessage values drops that tag, so a size summed from *)
+(* the decoded lengths misses it. That is how Alonzo onward are measured   *)
+(* on main, and how the first fix measured Shelley-family transactions;    *)
+(* the fix measures each component's span in the received bytes.          *)
+(* UNSOURCED: whether the reference decoder accepts such a tag at all; the *)
+(* size measure is checked here only as a function of the bytes.          *)
 (* Symbols are read as in specs/hello/Hello.tla.                           *)
 (***************************************************************************)
 EXTENDS Naturals
 
 CONSTANTS
-    Rule    \* "main": Dingo before the fix; "fixed": the branch
+    Rule    \* "main": Dingo before the fix; "decoded": the first fix, from
+            \* decoded component lengths; "fixed": from component spans
 
-\* Literally: "Rules is defined as the set containing "main" and "fixed"."
-\* In English: the two Dingo behaviours a configuration can pick.
-Rules == {"main", "fixed"}
+\* Literally: "Rules is defined as the set containing "main", "decoded"
+\*   and "fixed"."
+\* In English: the three Dingo behaviours a configuration can pick.
+Rules == {"main", "decoded", "fixed"}
 ASSUME Rule \in Rules
 
 \* Literally: "FamilyEras is defined as the set containing "Shelley",
@@ -65,17 +79,24 @@ Auxes == {"null", "map", "mapScripts"}
 \* something else (two or five components, trailing bytes, not an array).
 Shapes == {"three", "other"}
 
-VARIABLES era, framing, aux, shape
-vars == <<era, framing, aux, shape>>
+VARIABLES era, framing, aux, shape, tagged
+vars == <<era, framing, aux, shape, tagged>>
+
+\* Literally: "TagLen is defined as 3."
+\* In English: the bytes of the self-describe tag d9 d9 f7.
+TagLen == 3
 
 \* In English: byte lengths of the components, small stand-ins; only that
 \* they stay the same across framings matters.
 BodyLen == 5
 WitsLen == 2
 
-\* Literally: "AuxLen is defined as: 1 if aux is "null", 4 if "map", else 7."
-\* In English: the bytes the third component occupies as received.
-AuxLen == IF aux = "null" THEN 1 ELSE IF aux = "map" THEN 4 ELSE 7
+\* Literally: "AuxLen is defined as: (1 if aux is "null", 4 if "map", else
+\*   7) plus TagLen if tagged."
+\* In English: the bytes the third component occupies as received, a tag
+\* in front of it included.
+AuxLen == (IF aux = "null" THEN 1 ELSE IF aux = "map" THEN 4 ELSE 7)
+          + (IF tagged THEN TagLen ELSE 0)
 
 \* Literally: "HeaderLen(f) is defined as: 1 if f is "definite", 3 if
 \*   "wide16", else 2."
@@ -96,22 +117,27 @@ RefSize == 1 + BodyLen + WitsLen + AuxLen
 
 \* Literally: "DingoSize(f) is defined as: Received(f) if the shape is
 \*   "other"; otherwise, for a family era under Rule "main", Received(f);
-\*   for a family era under "fixed", RefSize; for any other era, RefSize."
+\*   otherwise RefSize minus TagLen if tagged and Rule is not "fixed";
+\*   otherwise RefSize."
 \* In English: what FromCBOR returns. Alonzo onward drop the framing
 \* already, so they return RefSize under both rules; a malformed or
 \* non-three-component envelope falls back to the received length.
+\* Summing decoded RawMessage lengths (Alonzo onward on main, and the first
+\* fix) loses a component's tag.
 DingoSize(f) ==
     IF shape = "other" THEN Received(f)
     ELSE IF era \in FamilyEras /\ Rule = "main" THEN Received(f)
+    ELSE IF tagged /\ Rule # "fixed" THEN RefSize - TagLen
     ELSE RefSize
 
 \* Literally: "Init is defined as: era is any era, framing, aux and shape
-\*   are members of their sets."
+\*   are members of their sets, and tagged is a boolean."
 \* In English: pick a cell of the table.
 Init == /\ era \in FamilyEras \cup OtherEras
         /\ framing \in Framings
         /\ aux \in Auxes
         /\ shape \in Shapes
+        /\ tagged \in BOOLEAN
 
 \* Literally: "Next is defined as: vars is unchanged."
 Next == UNCHANGED vars
@@ -131,12 +157,14 @@ FramingIndependent ==
     shape = "three" => DingoSize(framing) = DingoSize("definite")
 
 \* Literally: "OtherErasUnchanged is defined as: for an era outside the
-\*   family, DingoSize(framing) equals the main result."
+\*   family and untagged components, DingoSize(framing) equals the main
+\*   result."
 \* In English: Alonzo and Conway measure the same under the fix as before
-\* it. Their main result is RefSize for a three-component shape and the
-\* received length otherwise.
+\* it, except that a tagged component is now counted in full. Their main
+\* result is RefSize for a three-component shape and the received length
+\* otherwise.
 OtherErasUnchanged ==
-    era \in OtherEras =>
+    (era \in OtherEras /\ ~tagged) =>
         DingoSize(framing) = IF shape = "three" THEN RefSize
                              ELSE Received(framing)
 
