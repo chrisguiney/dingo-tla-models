@@ -16,4 +16,6 @@ atomic commit gives: the store ends as one application would leave it.
 | `ChunkedApplyWipeBug` | fails `NeverTooBig`: a reward epoch wipe row is weighed as one row and deletes every output row of the epoch inside the batch's transaction, on a batch with no tip, change or failure mark |
 | `ChunkedApplyWipeOrderBug` | fails `ReplayEqualsOnce`: the wipe runs ahead of the batch's rollback, which restores the rows it removed |
 | `ChunkedApplyWipeFixed` | passes the same five invariants with the wipe in transactions of its own after the rollback |
+| `ChunkedApplyPruneBug` | fails `NeverTooBig`: a nonce prune deletes every stale non-checkpoint nonce below its cutoff in the transaction that holds it, uncounted by the estimate, on the epoch rollover's batch with no tip, change or failure mark |
+| `ChunkedApplyPruneFixed` | passes the same five invariants with the stale nonces deleted in bounded transactions ahead of the batch |
 | `ChunkedApplyFixed` | passes `NeverTooBig`, `ReplayEqualsOnce`, `FeeOnce`, `FeeCounted`, `RollbackKept` |

@@ -11,3 +11,4 @@ Local only. Never referenced from anything published.
 | dingo#6655 | `fix/badgerutxo-reward-txn-budget` `da1b0d82b` | `badgerutxo-chunked-apply` | `ChunkedApply*` |
 | dingo #6805 | `fix/indexer-direct-deposit-order` | `indexer-fact-copy-order` | `FactCopy*` |
 | dingo #6806 | `fix/badgerutxo-slotless-reward-txn` `e98d005da` | `badgerutxo-chunked-apply` | `ChunkedApplyWipe*` |
+| dingo #6806 | `fix/badgerutxo-slotless-reward-txn` | `badgerutxo-chunked-apply` | `ChunkedApplyPrune*` (the crash's real batch: the epoch rollover nonce prune) |
