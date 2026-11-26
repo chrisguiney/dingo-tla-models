@@ -25,6 +25,13 @@
 (*        failure mark rolls back to PointBefore(mark) when one is found. *)
 (*   [D5] epoch.go putSnapshot: a snapshot put is not journaled; it      *)
 (*        writes a capture index entry at the row's capture slot.         *)
+(*   [D6] rows.go putRows and reward.go wipeRewardEpoch: a reward epoch   *)
+(*        wipe row deletes every output row of the epoch and its index    *)
+(*        rows in the transaction that holds it, with no journal entry,   *)
+(*        and the batch's output puts follow it. A rollback restores the  *)
+(*        prior value of a journaled row, so the wipe goes after it. The  *)
+(*        wipe row has no slot: a batch of nothing else has no tip, no    *)
+(*        change and no failure mark.                                     *)
 (*                                                                         *)
 (* Reference: UNSOURCED. The split of one ledger commit into several      *)
 (* storage transactions is Dingo's own; cardano-node's LedgerDB has no    *)
@@ -46,9 +53,11 @@ CONSTANTS
     KeepRollbackWithoutOps,     \* the batch rollback stays on the batch when no op is extracted
     RowsBeforeOps,              \* rows go ahead of extracted ops, as in one transaction
     RewindStrayCapture,         \* PointBefore finds snapshot capture index entries past the tip (not taken)
+    SplitWipe,                  \* a reward epoch wipe runs in bounded transactions of its own
+    WipeAfterRollback,          \* the wipe transactions follow the batch's rollback
     MaxCrashes                  \* crashes per behaviour
 
-\* Literally: "the first five constants are each TRUE or FALSE, and
+\* Literally: "the first seven constants are each TRUE or FALSE, and
 \*   MaxCrashes is a natural number."
 \* In English: the flags pick a Dingo version; see the configs.
 ASSUME /\ ExtractOps \in BOOLEAN
@@ -56,16 +65,20 @@ ASSUME /\ ExtractOps \in BOOLEAN
        /\ KeepRollbackWithoutOps \in BOOLEAN
        /\ RowsBeforeOps \in BOOLEAN
        /\ RewindStrayCapture \in BOOLEAN
+       /\ SplitWipe \in BOOLEAN
+       /\ WipeAfterRollback \in BOOLEAN
        /\ MaxCrashes \in Nat
 
 \* In English: the fee a Fee op adds. Any positive amount shows a double.
 F == 1
 
-\* Literally: "Order is defined as the sequence of eleven step names."
+\* Literally: "Order is defined as the sequence of thirteen step names."
 \* In English: the order applyLedgerTxn writes a transaction's parts in
 \* [D2], with "mark" and "clear" for the failure mark around them [D1].
-Order == <<"mark", "rollback", "epoch", "snap", "row", "open", "fee",
-           "count", "change", "tip", "clear">>
+\* "wipe" and "put" are a reward epoch wipe row and the output puts that
+\* follow it, inside the rows [D6].
+Order == <<"mark", "rollback", "epoch", "snap", "wipe", "put", "row", "open",
+           "fee", "count", "change", "tip", "clear">>
 
 \* Literally: "OpSteps is defined as the set of "snap", "open", "fee" and
 \*   "count"."
@@ -78,6 +91,8 @@ OpSteps == {"snap", "open", "fee", "count"}
 \* back first (DeleteNoncesAfter). ops: which ops it carries. overBudget:
 \* the ops and the other rows exceed one transaction. hasChange: it carries
 \* a UTxO change, whose journal record goes in a transaction of its own.
+\* wipe: it carries a reward epoch wipe row whose deletes are more than one
+\* transaction holds, and the output puts after it.
 \* feeSource: what creates the fee row the Fee op adds to, a reward block
 \* Open op or a row put. entries: whether the batch's journaled writes lie
 \* past the tip, or at or below it, which only a batch that rolls back
@@ -86,6 +101,7 @@ Shapes == [hasRollback : BOOLEAN,
            ops : {"none", "snapOnly", "rewardOnly", "both"},
            overBudget : BOOLEAN,
            hasChange : BOOLEAN,
+           wipe : BOOLEAN,
            feeSource : {"open", "row"},
            entries : {"pastTip", "belowTip"}]
 
@@ -124,12 +140,19 @@ AllSteps ==
     \cup Opt(RewardOps, {"fee", "count"})
     \cup Opt(RewardOps /\ b.feeSource = "open", {"open"})
     \cup Opt(b.hasChange, {"change"})
+    \cup Opt(b.wipe, {"wipe", "put"})
 
 \* Literally: "Dropped is defined as: ExtractOps and not
 \*   KeepRollbackWithoutOps."
 \* In English: the version moves the rollback off the batch whenever the
 \* family estimate is over budget, even with no op to carry it [D1].
 Dropped == ExtractOps /\ ~KeepRollbackWithoutOps
+
+\* Literally: "RollbackFirst is: the batch wipes and rolls back, SplitWipe
+\*   and WipeAfterRollback."
+\* In English: the batch's rollback goes in a transaction ahead of the wipe,
+\* as the rollback goes alone ahead of a bulk delete [D1].
+RollbackFirst == b.wipe /\ b.hasRollback /\ SplitWipe /\ WipeAfterRollback
 
 \* Literally: "RowLead is the one-element sequence of {"row"} if rows go
 \*   first and the batch has one, else the empty sequence; SnapLead and
@@ -156,7 +179,8 @@ LeadSteps == UNION {Lead0[i] : i \in 1..Len(Lead0)}
 \*   the batch rolls back, "rollback"."
 \* In English: the first transaction sets the failure mark and carries the
 \* batch's rollback [D1].
-Lead == [Lead0 EXCEPT ![1] = @ \cup {"mark"} \cup Opt(b.hasRollback, {"rollback"})]
+Lead == [Lead0 EXCEPT ![1] = @ \cup {"mark"}
+                          \cup Opt(b.hasRollback /\ ~RollbackFirst, {"rollback"})]
 
 \* Literally: "Units is the one-element sequence of {"change"} if the batch
 \*   has a change, else empty."
@@ -174,25 +198,50 @@ Chunked(S) ==
     THEN <<{"mark", "change"}, (S \ {"change"}) \cup {"clear"}>>
     ELSE <<S>>
 
-\* Literally: "Plan is defined by cases on the shape and the flags."
+\* Literally: "Steps is AllSteps less "wipe" and, with RollbackFirst,
+\*   "rollback", if SplitWipe, else AllSteps."
+\* In English: a split wipe, and the rollback that goes ahead of it, are
+\* taken out of the plan's transactions, so the plan holds the puts that
+\* follow them [D6].
+Steps ==
+    IF SplitWipe
+    THEN (AllSteps \ {"wipe"}) \ Opt(RollbackFirst, {"rollback"})
+    ELSE AllSteps
+
+\* Literally: "Core is defined by cases on the shape and the flags."
 \* In English: the transactions applyChunked writes [D1]. A batch within
 \* budget is one transaction. One over budget with ops, in a version that
 \* extracts them, leads with them; without ops, the rollback may be lost.
 \* A version that does not extract them keeps them in the last transaction.
-Plan ==
-    CASE ~b.overBudget -> <<AllSteps>>
+Core ==
+    CASE ~b.overBudget -> <<Steps>>
       [] HasOps /\ ExtractOps ->
             Lead \o Units
-                 \o <<(AllSteps \ (LeadSteps \cup {"rollback", "change"}))
+                 \o <<(Steps \ (LeadSteps \cup {"rollback", "change"}))
                       \cup {"clear"}>>
       [] OTHER ->
-            Chunked(AllSteps \ Opt(Dropped /\ ~HasOps, {"rollback"}))
+            Chunked(Steps \ Opt(Dropped /\ ~HasOps, {"rollback"}))
+
+\* Literally: "Plan is Core, led by the rollback when RollbackFirst and a
+\*   transaction of the wipe, when the batch wipes and SplitWipe."
+\* In English: the wipe runs in transactions of its own ahead of the rest of
+\* the plan, after the batch's rollback [D6]. It is the same on a second run.
+Plan ==
+    IF SplitWipe /\ b.wipe
+    THEN (IF RollbackFirst THEN <<{"rollback"}>> ELSE <<>>)
+         \o <<{"wipe"}>> \o Core
+    ELSE Core
 
 \* Literally: "TooBig(T) is: the batch is over budget, T holds an op and
-\*   T holds the epoch row."
+\*   T holds the epoch row; or the batch wipes and T holds the wipe while
+\*   SplitWipe is off."
 \* In English: a transaction with the ops beside the batch's other rows
 \* fails with ErrTxnTooBig, on every attempt.
-TooBig(T) == b.overBudget /\ T \cap OpSteps # {} /\ "epoch" \in T
+\* A transaction that holds a wipe not split off fails the same way: it
+\* deletes every output row of the epoch and their index rows [D6].
+TooBig(T) ==
+    \/ b.overBudget /\ T \cap OpSteps # {} /\ "epoch" \in T
+    \/ b.wipe /\ "wipe" \in T /\ ~SplitWipe
 
 \* Literally: "Base is the record of the journaled fields before the
 \*   batch."
@@ -201,9 +250,11 @@ Base == [feeKnown |-> FALSE, fee |-> 0, count |-> 0, next |-> FALSE]
 
 \* Literally: "Init0 is the record of the store before the batch."
 \* In English: the old tip, no mark, a nonce the batch's rollback must
-\* delete when it has one, and nothing the batch writes.
+\* delete when it has one, the old reward outputs a wipe removes, and
+\* nothing the batch writes.
 Init0 == [tip |-> "old", mark |-> FALSE, nonce |-> b.hasRollback,
           epochRow |-> FALSE, snap |-> FALSE, snapPast |-> FALSE,
+          old |-> b.wipe, fresh |-> FALSE,
           feeKnown |-> FALSE, fee |-> 0, count |-> 0, next |-> FALSE,
           utxo |-> FALSE, record |-> FALSE,
           hasSaved |-> FALSE, saved |-> Base]
@@ -223,7 +274,7 @@ Save(s) ==
     ELSE s
 
 \* Literally: "Do(s, x) is the store after step x, by cases on x."
-\* In English: one write [D2, D3, D5]. The rollback undoes every journaled
+\* In English: one write [D2, D3, D5, D6]. The rollback undoes every journaled
 \* row above its slot, which is all the batch wrote, and deletes the
 \* snapshot rows of the epoch with no epoch row yet [D4]. A Fee op adds only
 \* to a fee row that exists; a count is a no-op once counted.
@@ -231,7 +282,8 @@ Do(s, x) ==
     CASE x = "mark" -> [s EXCEPT !.mark = TRUE]
       [] x = "clear" -> [s EXCEPT !.mark = FALSE]
       [] x = "rollback" ->
-            [s EXCEPT !.nonce = FALSE, !.feeKnown = Base.feeKnown,
+            [s EXCEPT !.nonce = FALSE, !.old = b.wipe,
+                      !.feeKnown = Base.feeKnown,
                       !.fee = Base.fee, !.count = Base.count,
                       !.next = Base.next, !.hasSaved = FALSE,
                       !.snap = IF s.epochRow THEN s.snap ELSE FALSE,
@@ -239,6 +291,8 @@ Do(s, x) ==
       [] x = "epoch" -> [s EXCEPT !.epochRow = TRUE]
       [] x = "snap" ->
             [s EXCEPT !.snap = TRUE, !.snapPast = (b.entries = "pastTip")]
+      [] x = "wipe" -> [s EXCEPT !.old = FALSE]
+      [] x = "put" -> [s EXCEPT !.fresh = TRUE]
       [] x = "row" -> [Save(s) EXCEPT !.feeKnown = TRUE, !.fee = 0]
       [] x = "open" ->
             IF s.feeKnown THEN s
@@ -268,7 +322,8 @@ Expected == Fold(Init0, AllSteps, 1)
 \* Literally: "Proj(s) is the record of s's fields a reader sees."
 \* In English: the store's contents, without the bookkeeping.
 Proj(s) == [tip |-> s.tip, nonce |-> s.nonce, epochRow |-> s.epochRow,
-            snap |-> s.snap, feeKnown |-> s.feeKnown, fee |-> s.fee,
+            snap |-> s.snap, old |-> s.old, fresh |-> s.fresh,
+            feeKnown |-> s.feeKnown, fee |-> s.fee,
             count |-> s.count, utxo |-> s.utxo]
 
 \* Literally: "Found(s) is: s has a record past the tip, or the version
