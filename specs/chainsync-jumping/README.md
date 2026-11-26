@@ -11,8 +11,9 @@ The reference has no such exemption. A peer that has sent no header is left to t
 | Config | Rule | Dynamo | States | Result |
 | --- | --- | --- | --- | --- |
 | `CsjDynamoStallDingoBug.cfg` | a hold always excuses silence | silent | | **fails** `SilentDynamoReplaced` |
-| `CsjDynamoStallFixed.cfg` | a hold excuses silence only after a delivery | silent | 10 | passes |
-| `CsjDynamoStallFixedHonest.cfg` | same | delivers | 285 | passes |
+| `CsjDynamoStallDeliveredOnlyBug.cfg` | a hold excuses silence only after a verified delivery | parks its first header | | **fails** `BusyDynamoKept` |
+| `CsjDynamoStallFixed.cfg` | a hold excuses silence only after the dynamo sent a header | silent | 10 | passes |
+| `CsjDynamoStallFixedHonest.cfg` | same | delivers or parks | 558 | passes |
 | `CsjDynamoStallReference.cfg` | reference | silent | 10 | passes |
 
 The shortest `DingoBug` trace: the selector holds the stream of the newly elected dynamo, and every later stall check restarts the clock while the dynamo stays silent past the timeout.
@@ -20,3 +21,14 @@ The shortest `DingoBug` trace: the selector holds the stream of the newly electe
 Dingo test: `TestChainsyncJumpingDynamoStallCheck/a_held_dynamo_that_delivered_nothing_is_recycled` (fails on Dingo main and on the integration branch before the fix). Fix: local integration branch `46e41a232`.
 
 Not modelled: why the selector holds a dynamo that has delivered nothing (the Limit on Eagerness computation, or a pause counter left on a replaced peer-tip record), and a dynamo held after a delivery that is never released, which the reference resolves with the density rule.
+
+`DeliveredOnlyBug` is the fix as first written: only a verified delivery
+(`csjObserveDelivery`) set the flag, but the roll-forward callback parks a
+header before verifying it (header capacity, the catch-up band, the
+future-header wait) while the stream is held, so a dynamo whose first header
+was parked was recycled at `DynamoStallTimeout` (30 s) while the node's own
+wait could run 60 s. The fix sets the flag on receipt
+(`csjObserveHeaderSent`, called from `chainsyncClientRollForwardAt` before
+any wait). `NodeWait` bounds a parked header; `BusyDynamoKept` says a dynamo
+is not recycled while the node waits on its header. Dingo test:
+`TestChainsyncJumpingDynamoStallCheck/a_held_dynamo_whose_first_header_is_parked_is_kept`.
