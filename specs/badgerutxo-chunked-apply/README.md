@@ -13,4 +13,7 @@ atomic commit gives: the store ends as one application would leave it.
 | `ChunkedApplyRollbackDropBug` | fails `RollbackKept`: over budget with no op to extract, the batch's `DeleteNoncesAfter` is dropped |
 | `ChunkedApplyOrderBug` | fails `FeeCounted`: extracted reward block ops run before the rows the last transaction carries |
 | `ChunkedApplyStrayCaptureProbeBug` | fails `SnapshotFollowsTip` (probe): a stopped snapshot put is not rewound, and the replay rewrites it |
+| `ChunkedApplyWipeBug` | fails `NeverTooBig`: a reward epoch wipe row is weighed as one row and deletes every output row of the epoch inside the batch's transaction, on a batch with no tip, change or failure mark |
+| `ChunkedApplyWipeOrderBug` | fails `ReplayEqualsOnce`: the wipe runs ahead of the batch's rollback, which restores the rows it removed |
+| `ChunkedApplyWipeFixed` | passes the same five invariants with the wipe in transactions of its own after the rollback |
 | `ChunkedApplyFixed` | passes `NeverTooBig`, `ReplayEqualsOnce`, `FeeOnce`, `FeeCounted`, `RollbackKept` |
