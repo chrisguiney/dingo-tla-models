@@ -33,6 +33,15 @@
 (*        wipe row has no slot: a batch of nothing else has no tip, no    *)
 (*        change and no failure mark.                                     *)
 (*                                                                         *)
+(*   [D7] store.go applyLedgerTxn and nonce.go pruneNonces: a nonce prune    *)
+(*        deletes every non-checkpoint nonce below its cutoff in the       *)
+(*        transaction that holds it, after the batch's nonces are put, and *)
+(*        the estimate counts none of those deletes. The epoch rollover    *)
+(*        commits a batch of nothing else: no tip, change or failure mark. *)
+(*        store.go ApplyLedgerBatch can delete the stale nonces in         *)
+(*        bounded transactions of their own first, as a prefix wipe is     *)
+(*        deleted; the batch's own prune then finds none.                  *)
+(*                                                                         *)
 (* Reference: UNSOURCED. The split of one ledger commit into several      *)
 (* storage transactions is Dingo's own; cardano-node's LedgerDB has no    *)
 (* counterpart. The property checked is the one a single atomic commit    *)
@@ -55,9 +64,10 @@ CONSTANTS
     RewindStrayCapture,         \* PointBefore finds snapshot capture index entries past the tip (not taken)
     SplitWipe,                  \* a reward epoch wipe runs in bounded transactions of its own
     WipeAfterRollback,          \* the wipe transactions follow the batch's rollback
+    SplitPrune,                 \* the stale nonces are deleted in bounded transactions ahead of the batch
     MaxCrashes                  \* crashes per behaviour
 
-\* Literally: "the first seven constants are each TRUE or FALSE, and
+\* Literally: "the first eight constants are each TRUE or FALSE, and
 \*   MaxCrashes is a natural number."
 \* In English: the flags pick a Dingo version; see the configs.
 ASSUME /\ ExtractOps \in BOOLEAN
@@ -67,6 +77,7 @@ ASSUME /\ ExtractOps \in BOOLEAN
        /\ RewindStrayCapture \in BOOLEAN
        /\ SplitWipe \in BOOLEAN
        /\ WipeAfterRollback \in BOOLEAN
+       /\ SplitPrune \in BOOLEAN
        /\ MaxCrashes \in Nat
 
 \* In English: the fee a Fee op adds. Any positive amount shows a double.
@@ -76,9 +87,11 @@ F == 1
 \* In English: the order applyLedgerTxn writes a transaction's parts in
 \* [D2], with "mark" and "clear" for the failure mark around them [D1].
 \* "wipe" and "put" are a reward epoch wipe row and the output puts that
-\* follow it, inside the rows [D6].
-Order == <<"mark", "rollback", "epoch", "snap", "wipe", "put", "row", "open",
-           "fee", "count", "change", "tip", "clear">>
+\* follow it, inside the rows [D6]. "prune" is the batch's nonce prune,
+\* and "pruneBulk" the bounded transactions that delete the stale nonces
+\* ahead of the batch [D7].
+Order == <<"pruneBulk", "mark", "rollback", "epoch", "snap", "wipe", "put",
+           "row", "open", "fee", "count", "prune", "change", "tip", "clear">>
 
 \* Literally: "OpSteps is defined as the set of "snap", "open", "fee" and
 \*   "count"."
@@ -92,7 +105,8 @@ OpSteps == {"snap", "open", "fee", "count"}
 \* the ops and the other rows exceed one transaction. hasChange: it carries
 \* a UTxO change, whose journal record goes in a transaction of its own.
 \* wipe: it carries a reward epoch wipe row whose deletes are more than one
-\* transaction holds, and the output puts after it.
+\* transaction holds, and the output puts after it. prune: it carries a
+\* nonce prune whose stale nonces are more than one transaction holds.
 \* feeSource: what creates the fee row the Fee op adds to, a reward block
 \* Open op or a row put. entries: whether the batch's journaled writes lie
 \* past the tip, or at or below it, which only a batch that rolls back
@@ -102,6 +116,7 @@ Shapes == [hasRollback : BOOLEAN,
            overBudget : BOOLEAN,
            hasChange : BOOLEAN,
            wipe : BOOLEAN,
+           prune : BOOLEAN,
            feeSource : {"open", "row"},
            entries : {"pastTip", "belowTip"}]
 
@@ -141,6 +156,7 @@ AllSteps ==
     \cup Opt(RewardOps /\ b.feeSource = "open", {"open"})
     \cup Opt(b.hasChange, {"change"})
     \cup Opt(b.wipe, {"wipe", "put"})
+    \cup Opt(b.prune, {"prune"})
 
 \* Literally: "Dropped is defined as: ExtractOps and not
 \*   KeepRollbackWithoutOps."
@@ -226,22 +242,36 @@ Core ==
 \*   transaction of the wipe, when the batch wipes and SplitWipe."
 \* In English: the wipe runs in transactions of its own ahead of the rest of
 \* the plan, after the batch's rollback [D6]. It is the same on a second run.
-Plan ==
+WipePlan ==
     IF SplitWipe /\ b.wipe
     THEN (IF RollbackFirst THEN <<{"rollback"}>> ELSE <<>>)
          \o <<{"wipe"}>> \o Core
     ELSE Core
 
-\* Literally: "TooBig(T) is: the batch is over budget, T holds an op and
+\* Literally: "Plan is WipePlan led by a transaction of the bulk prune when
+\*   the batch prunes and SplitPrune."
+\* In English: the stale nonces are deleted ahead of everything else, in
+\* transactions that each hold a bounded number of deletes [D7]. A crash
+\* between them leaves some stale, which the same step run again deletes.
+Plan ==
+    IF SplitPrune /\ b.prune
+    THEN <<{"pruneBulk"}>> \o WipePlan
+    ELSE WipePlan
+
+\* Literally: "TooBig(T, s) is: the batch is over budget, T holds an op and
 \*   T holds the epoch row; or the batch wipes and T holds the wipe while
-\*   SplitWipe is off."
+\*   SplitWipe is off; or T holds the prune while s still has stale
+\*   nonces."
 \* In English: a transaction with the ops beside the batch's other rows
 \* fails with ErrTxnTooBig, on every attempt.
 \* A transaction that holds a wipe not split off fails the same way: it
 \* deletes every output row of the epoch and their index rows [D6].
-TooBig(T) ==
+\* A transaction that holds the prune deletes every stale nonce below the
+\* cutoff, which the estimate does not count [D7].
+TooBig(T, s) ==
     \/ b.overBudget /\ T \cap OpSteps # {} /\ "epoch" \in T
     \/ b.wipe /\ "wipe" \in T /\ ~SplitWipe
+    \/ "prune" \in T /\ s.stale
 
 \* Literally: "Base is the record of the journaled fields before the
 \*   batch."
@@ -254,7 +284,7 @@ Base == [feeKnown |-> FALSE, fee |-> 0, count |-> 0, next |-> FALSE]
 \* nothing the batch writes.
 Init0 == [tip |-> "old", mark |-> FALSE, nonce |-> b.hasRollback,
           epochRow |-> FALSE, snap |-> FALSE, snapPast |-> FALSE,
-          old |-> b.wipe, fresh |-> FALSE,
+          old |-> b.wipe, fresh |-> FALSE, stale |-> b.prune,
           feeKnown |-> FALSE, fee |-> 0, count |-> 0, next |-> FALSE,
           utxo |-> FALSE, record |-> FALSE,
           hasSaved |-> FALSE, saved |-> Base]
@@ -293,6 +323,8 @@ Do(s, x) ==
             [s EXCEPT !.snap = TRUE, !.snapPast = (b.entries = "pastTip")]
       [] x = "wipe" -> [s EXCEPT !.old = FALSE]
       [] x = "put" -> [s EXCEPT !.fresh = TRUE]
+      [] x = "pruneBulk" -> [s EXCEPT !.stale = FALSE]
+      [] x = "prune" -> [s EXCEPT !.stale = FALSE]
       [] x = "row" -> [Save(s) EXCEPT !.feeKnown = TRUE, !.fee = 0]
       [] x = "open" ->
             IF s.feeKnown THEN s
@@ -323,6 +355,7 @@ Expected == Fold(Init0, AllSteps, 1)
 \* In English: the store's contents, without the bookkeeping.
 Proj(s) == [tip |-> s.tip, nonce |-> s.nonce, epochRow |-> s.epochRow,
             snap |-> s.snap, old |-> s.old, fresh |-> s.fresh,
+            stale |-> s.stale,
             feeKnown |-> s.feeKnown, fee |-> s.fee,
             count |-> s.count, utxo |-> s.utxo]
 
@@ -365,7 +398,7 @@ Init == /\ b \in {s \in Shapes : s.entries = "belowTip" => s.hasRollback}
 \* In English: one transaction of the plan commits, or fails for size.
 Commit ==
     /\ phase = "run"
-    /\ IF TooBig(Plan[pc])
+    /\ IF TooBig(Plan[pc], st)
        THEN /\ phase' = "toobig"
             /\ UNCHANGED <<b, st, pc, crashes>>
        ELSE /\ st' = Fold(st, Plan[pc], 1)
