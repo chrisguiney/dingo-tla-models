@@ -5,7 +5,7 @@ SHELL := bash
 # is expected to FAIL (a mutation, a known bug, or a reachability probe).
 CONFIGS := $(filter-out %Bug.cfg,$(wildcard specs/*/*.cfg))
 
-.PHONY: help install hello hello-bug txsubmission-client chainsync-jumping metadata-migration-lock badgerutxo-chunked-apply models check clean
+.PHONY: help install hello hello-bug txsubmission-client chainsync-jumping metadata-migration-lock badgerutxo-chunked-apply indexer-fact-copy-order models check clean
 
 help: ## Show this list
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  make %-20s %s\n", $$1, $$2}'
@@ -30,6 +30,9 @@ metadata-migration-lock: ## Check opening the metadata migration lock in a share
 
 badgerutxo-chunked-apply: ## Check a chunked ledger batch in the live UTxO store under crash and replay
 	@scripts/run-model.sh specs/badgerutxo-chunked-apply
+
+indexer-fact-copy-order: ## Check the IndexerDB fact copy of a segment that registers and credits an account
+	@scripts/run-model.sh specs/indexer-fact-copy-order
 
 models: ## Check every config of every model, Bug ones expected to fail
 	@set -e; for d in specs/*/; do scripts/run-model.sh "$${d%/}"; done
