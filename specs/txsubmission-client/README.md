@@ -27,6 +27,7 @@ returns, and node shutdown stops the mempool before draining connections.
 | `TxSubmissionLocalStopEmptyBug.cfg` | ends on `StopChan`, empty list | yes | | **fails** `LocalStopBlamesNoPeer` |
 | `TxSubmissionLocalStopFixed.cfg` | ends on any release with `ErrStopServerProcess` | yes | 30 | passes |
 | `TxSubmissionLocalStopFixedNoJoin.cfg` | same | no | 34 | passes |
+| `TxSubmissionLocalStopMetricBug.cfg` | same, metric exempts only chain-sync's stop | yes | | **fails** `LocalStopCountsNoError` |
 
 `MainBug` is node shutdown on Dingo `main`: the mempool stops, the wait
 returns nothing, and the empty reply closes the connection with
@@ -40,3 +41,10 @@ with no consumer, with `ErrStopServerProcess`, as the reference answers
 `Terminate`. Dingo test:
 `TestTxSubmissionClientEndsBlockingWaitWithDoneWhenMempoolStops`.
 
+
+`MetricBug` is the fix as first written: `recordProtocolMessage`
+(`ouroboros/metrics_protocol.go`) labels a callback's non-nil error
+`outcome="error"` unless it is chain-sync's `ErrStopSyncProcess`, so every
+answered stop counted as an error on shutdown. The fixed configs set
+`MetricExemptsStop` and check `LocalStopCountsNoError`. Dingo test:
+`TestInstrumentTxsubmissionRequestTxIds_StopIsNotAnError`.

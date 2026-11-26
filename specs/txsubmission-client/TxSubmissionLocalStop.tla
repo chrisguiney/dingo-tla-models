@@ -40,6 +40,13 @@
 (* FALSE for gOuroboros main, where Close returns while a callback still   *)
 (* runs; TRUE once Stop and Close join the protocol's goroutines [G4].     *)
 (*                                                                         *)
+(* Whether Dingo's per-protocol message metric counts a stop answer as an  *)
+(* error, the constant MetricExemptsStop: every Dingo callback's result is *)
+(* labelled success or error [D4]. FALSE is the fix as first written,      *)
+(* where only chain-sync's stop sentinel was exempt, so each answered stop *)
+(* counted as an error; TRUE exempts ErrStopServerProcess as well. The     *)
+(* reference keeps no such metric, and its Terminate is not an error.      *)
+(*                                                                         *)
 (* Sources. IntersectMBO/ouroboros-network commit 5f356486ab3e:            *)
 (*   [R1] ouroboros-network/lib/Ouroboros/Network/TxSubmission/            *)
 (*        Outbound.hs 193-210: the blocking wait is                        *)
@@ -68,6 +75,9 @@
 (*        cancels it.                                                      *)
 (*   [D3] node_shutdown.go phase 2: the mempool capability is stopped      *)
 (*        before the connection manager drains the connections.           *)
+(*   [D4] ouroboros/metrics_protocol.go recordProtocolMessage, called by   *)
+(*        instrumentTxsubmissionRequestTxIds in ouroboros/txsubmission.go: *)
+(*        a non-nil callback error is outcome="error" unless exempted.     *)
 (*                                                                         *)
 (* Symbols are explained in specs/keepalive/KeepAlive.tla's header.        *)
 (***************************************************************************)
@@ -76,7 +86,8 @@ EXTENDS Naturals
 CONSTANTS
     Callback,        \* "reference", "waitCleanup", "emptyOnStop" or "doneOnStop"
     JoinsCallbacks,  \* TRUE: Close waits for a running callback [G4]
-    MaxTx            \* transactions that may reach the mempool (0: a quiet node)
+    MaxTx,           \* transactions that may reach the mempool (0: a quiet node)
+    MetricExemptsStop \* TRUE: a stop answer is not counted as an error [D4]
 
 VARIABLES
     conn,       \* "open", "closing" (Close called, waiting) or "closed" (Close returned)
@@ -84,19 +95,20 @@ VARIABLES
     mempool,    \* transactions available to announce
     cancelled,  \* TRUE once the consumer's wait is released: cleanup or mempool stop [D2]
     sent,       \* what the client put on the wire: "nothing", "reply" or "done"
-    closeErr    \* the error the connection reports: "none" or "protocolViolation"
+    closeErr,   \* the error the connection reports: "none" or "protocolViolation"
+    errMetric   \* TRUE once Dingo's message metric counted this callback as an error [D4]
 
-\* Literally: "vars is defined as the tuple of all six variables."
-vars == <<conn, waiting, mempool, cancelled, sent, closeErr>>
+\* Literally: "vars is defined as the tuple of all seven variables."
+vars == <<conn, waiting, mempool, cancelled, sent, closeErr, errMetric>>
 
 \* In English: "Every variable holds a value of the right kind."
 \* Literally: "TypeOK is defined as: conn is one of the three connection
 \*   phases, and waiting and cancelled are booleans, and mempool is a natural
 \*   number, and sent is one of three wire outcomes, and closeErr is one of two
-\*   errors."
+\*   errors, and errMetric is a boolean."
 TypeOK ==
     /\ conn \in {"open", "closing", "closed"}
-    /\ waiting \in BOOLEAN /\ cancelled \in BOOLEAN
+    /\ waiting \in BOOLEAN /\ cancelled \in BOOLEAN /\ errMetric \in BOOLEAN
     /\ mempool \in Nat
     /\ sent \in {"nothing", "reply", "done"}
     /\ closeErr \in {"none", "protocolViolation"}
@@ -105,7 +117,7 @@ TypeOK ==
 \* is waiting with an empty mempool; nothing is closing yet."
 \* Literally: "Init is defined as: conn equals "open", and waiting equals TRUE,
 \*   and mempool equals 0, and cancelled equals FALSE, and sent equals
-\*   "nothing", and closeErr equals "none"."
+\*   "nothing", and closeErr equals "none", and errMetric equals FALSE."
 Init ==
     /\ conn = "open"
     /\ waiting = TRUE
@@ -113,6 +125,13 @@ Init ==
     /\ cancelled = FALSE
     /\ sent = "nothing"
     /\ closeErr = "none"
+    /\ errMetric = FALSE
+\* In English: "Dingo's callback answers a stop with ErrStopServerProcess
+\* (only "doneOnStop" does; the reference has no such metric), and the
+\* message metric does not exempt it, so the answer counts as an error [D4]."
+\* Literally: "StopCountsAsError is defined as: Callback equals "doneOnStop",
+\*   and MetricExemptsStop is not TRUE."
+StopCountsAsError == Callback = "doneOnStop" /\ ~MetricExemptsStop
 -----------------------------------------------------------------------------
 (* Steps. *)
 
@@ -123,7 +142,7 @@ Init ==
 TxArrives ==
     /\ mempool < MaxTx
     /\ mempool' = mempool + 1
-    /\ UNCHANGED <<conn, waiting, cancelled, sent, closeErr>>
+    /\ UNCHANGED <<conn, waiting, cancelled, sent, closeErr, errMetric>>
 
 \* In English: "Our own node calls Close: StopChan closes, and in the
 \* reference the control message becomes Terminate [R2]."
@@ -132,7 +151,7 @@ TxArrives ==
 Close ==
     /\ conn = "open"
     /\ conn' = "closing"
-    /\ UNCHANGED <<waiting, mempool, cancelled, sent, closeErr>>
+    /\ UNCHANGED <<waiting, mempool, cancelled, sent, closeErr, errMetric>>
 
 \* In English: "Close returns: at once, or, with JoinsCallbacks, only after
 \* the callback has returned [G4]."
@@ -143,7 +162,7 @@ CloseReturns ==
     /\ conn = "closing"
     /\ JoinsCallbacks => ~waiting                 \* the join [G4]
     /\ conn' = "closed"
-    /\ UNCHANGED <<waiting, mempool, cancelled, sent, closeErr>>
+    /\ UNCHANGED <<waiting, mempool, cancelled, sent, closeErr, errMetric>>
 
 \* In English: "After Close returns, Dingo's connection-closed handler
 \* cancels the connection's mempool consumer [D2]."
@@ -153,7 +172,7 @@ CloseReturns ==
 Cleanup ==
     /\ conn = "closed" /\ ~cancelled
     /\ cancelled' = TRUE
-    /\ UNCHANGED <<conn, waiting, mempool, sent, closeErr>>
+    /\ UNCHANGED <<conn, waiting, mempool, sent, closeErr, errMetric>>
 
 \* In English: "Node shutdown stops the mempool while the connection is
 \* still open, before it drains the connections [D3]; that too releases
@@ -164,7 +183,7 @@ Cleanup ==
 MempoolStops ==
     /\ conn = "open" /\ ~cancelled
     /\ cancelled' = TRUE
-    /\ UNCHANGED <<conn, waiting, mempool, sent, closeErr>>
+    /\ UNCHANGED <<conn, waiting, mempool, sent, closeErr, errMetric>>
 
 \* In English: "A transaction is there, so the callback answers it; the
 \* client sends the reply while the connection is open. Once it is closing
@@ -177,7 +196,7 @@ ReplyTx ==
     /\ waiting /\ mempool > 0
     /\ waiting' = FALSE
     /\ sent' = IF conn = "open" THEN "reply" ELSE sent   \* [R1] 210, [G3]
-    /\ UNCHANGED <<conn, mempool, cancelled, closeErr>>
+    /\ UNCHANGED <<conn, mempool, cancelled, closeErr, errMetric>>
 
 \* In English: "The stop wakes the wait with nothing to announce. The
 \* reference and the fix send MsgDone [R1][G1]; the first adaptation answers
@@ -189,7 +208,8 @@ ReplyTx ==
 \*   waiting in the next state equals FALSE, and sent in the next state equals
 \*   (if Callback is "emptyOnStop" then sent, else "done"), and closeErr in
 \*   the next state equals (if Callback is "emptyOnStop" then
-\*   "protocolViolation", else closeErr), and the other variables are
+\*   "protocolViolation", else closeErr), and errMetric in the next state
+\*   equals errMetric or StopCountsAsError, and the other variables are
 \*   unchanged."
 StopWakes ==
     /\ waiting /\ mempool = 0 /\ conn # "open"
@@ -198,6 +218,7 @@ StopWakes ==
     /\ sent' = IF Callback = "emptyOnStop" THEN sent ELSE "done"
     /\ closeErr' = IF Callback = "emptyOnStop"
                       THEN "protocolViolation" ELSE closeErr   \* [G2]
+    /\ errMetric' = (errMetric \/ StopCountsAsError)             \* [D4]
     /\ UNCHANGED <<conn, mempool, cancelled>>
 
 \* In English: "Releasing the consumer makes NextTx return nothing [D2].
@@ -209,19 +230,22 @@ StopWakes ==
 \* Literally: "CancelWakes is defined as: waiting is TRUE, and mempool equals
 \*   0, and cancelled is TRUE, and waiting in the next state equals FALSE, and
 \*   if Callback is "reference" or "doneOnStop", then sent in the next state
-\*   equals (if conn equals "open" then "done", else sent) and closeErr is
+\*   equals (if conn equals "open" then "done", else sent) and errMetric in
+\*   the next state equals errMetric or StopCountsAsError and closeErr is
 \*   unchanged, else closeErr in the next state equals (if conn equals
-\*   "closed" then closeErr, else "protocolViolation") and sent is unchanged;
+\*   "closed" then closeErr, else "protocolViolation") and sent and
+\*   errMetric are unchanged;
 \*   and the other variables are unchanged."
 CancelWakes ==
     /\ waiting /\ mempool = 0 /\ cancelled
     /\ waiting' = FALSE
     /\ IF Callback \in {"reference", "doneOnStop"}
           THEN /\ sent' = IF conn = "open" THEN "done" ELSE sent   \* [R1] 201
+               /\ errMetric' = (errMetric \/ StopCountsAsError)      \* [D4]
                /\ UNCHANGED closeErr
           ELSE /\ closeErr' = IF conn = "closed" THEN closeErr
                               ELSE "protocolViolation"              \* [G2]
-               /\ UNCHANGED sent
+               /\ UNCHANGED <<sent, errMetric>>
     /\ UNCHANGED <<conn, mempool, cancelled>>
 
 \* In English: "Once the callback has returned and the connection is closed
@@ -265,4 +289,10 @@ LocalStopBlamesNoPeer == closeErr = "none"
 \* Literally: "BlockingAnswerLegal is defined as: sent is one of "nothing",
 \*   "reply" and "done"."
 BlockingAnswerLegal == sent \in {"nothing", "reply", "done"}
+
+\* In English: "Stopping our own connection is not counted as a failed
+\* message: an operator's error rate does not rise on every shutdown." The
+\* reference ends the wait on Terminate as a normal outcome [R1].
+\* Literally: "LocalStopCountsNoError is defined as: errMetric is FALSE."
+LocalStopCountsNoError == ~errMetric
 =============================================================================
