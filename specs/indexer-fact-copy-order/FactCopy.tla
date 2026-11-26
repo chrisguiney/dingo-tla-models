@@ -7,7 +7,8 @@
 (* run again.                                                              *)
 (*                                                                         *)
 (* One reward account is followed through a sequence of transactions, each *)
-(* a registration, a Dijkstra direct deposit, or a withdrawal.             *)
+(* a registration, a Dijkstra direct deposit, a direct deposit carried by  *)
+(* a certified closure's transaction, or a withdrawal.                     *)
 (*                                                                         *)
 (* Dingo sources (blinklabs-io/dingo, commit eae4caf93):                   *)
 (*   [D1] internal/indexer/writer.go, the batch closure: per segment       *)
@@ -26,6 +27,10 @@
 (*        certificates and journals it at the transaction's slot.          *)
 (*   [D5] database/plugin/metadata/sqlstore/account.go: a credit is        *)
 (*        journaled under a unique key and applied once.                   *)
+(*   [D6] ledger/leios_apply.go: a certified closure's transaction is      *)
+(*        applied through the same delta, dated at the ranking block, so   *)
+(*        its direct deposit is credited and journaled like a body's [D4]; *)
+(*        internal/node/indexer_closure.go indexClosure indexes it.        *)
 (*                                                                         *)
 (* Reference: cardano-ledger 9e272f774431,                                 *)
 (* eras/dijkstra/impl/src/Cardano/Ledger/Dijkstra/Rules/Entities.hs        *)
@@ -41,18 +46,22 @@
 EXTENDS Naturals, Sequences, FiniteSets
 
 CONSTANTS
-    Mode,        \* "Dingo", "Defer", "Fixed" or "FixedNoDedup"; see the configs
+    Mode,        \* "Dingo", "Defer", "BodyOnly", "Fixed" or "FixedNoDedup"
     MaxTxs,      \* longest transaction sequence of a segment
     MaxCrashes   \* rolled-back attempts per behaviour
 
 \* In English: Dingo replays every credit first; Defer holds a credit whose
 \* account is missing until the blocks are indexed; Fixed also credits a
 \* direct deposit inside block indexing, in transaction order, and lets the
-\* held replay pass find it already journaled.
-ASSUME /\ Mode \in {"Dingo", "Defer", "Fixed", "FixedNoDedup"}
+\* held replay pass find it already journaled; BodyOnly does that for a
+\* block's own transactions but not for a certified closure's.
+ASSUME /\ Mode \in {"Dingo", "Defer", "BodyOnly", "Fixed", "FixedNoDedup"}
        /\ MaxTxs \in Nat /\ MaxCrashes \in Nat
 
-Kinds == {"reg", "dep", "wd"}
+\* "cdep" is a direct deposit in a certified closure's transaction.
+Kinds == {"reg", "dep", "cdep", "wd"}
+
+IsDep(k) == k \in {"dep", "cdep"}
 
 \* Literally: "AllSeqs is the set of every sequence over Kinds whose length
 \*   is between 1 and MaxTxs."
@@ -72,7 +81,7 @@ Led(s, k, r0, b0) ==
             ELSE CASE s[k] = "reg" ->
                         IF p.reg THEN [p EXCEPT !.ok = FALSE]
                         ELSE [ok |-> TRUE, reg |-> TRUE, bal |-> 0]
-                   [] s[k] = "dep" ->
+                   [] IsDep(s[k]) ->
                         IF ~p.reg THEN [p EXCEPT !.ok = FALSE]
                         ELSE [p EXCEPT !.bal = p.bal + 1]
                    [] s[k] = "wd" ->
@@ -97,7 +106,7 @@ vars == <<txs, reg0, bal0, idxReg, idxBal, journal, held, phase, pos,
 
 \* In English: the positions of the segment's direct deposits, which is what
 \* the ledger's credit journal holds for the segment [D4].
-Deps == {k \in 1..Len(txs) : txs[k] = "dep"}
+Deps == {k \in 1..Len(txs) : IsDep(txs[k])}
 
 Valid(s, r0, b0) == Led(s, Len(s), r0, b0).ok
 
@@ -149,8 +158,9 @@ Block ==
                               THEN failed' = TRUE /\ UNCHANGED idxBal
                               ELSE failed' = FALSE /\ idxBal' = idxBal - 1
                         /\ UNCHANGED <<idxReg, journal>>
-                   [] txs[pos] = "dep" ->
-                        /\ IF Mode \in {"Fixed", "FixedNoDedup"}
+                   [] IsDep(txs[pos]) ->
+                        /\ IF \/ Mode \in {"Fixed", "FixedNoDedup"}
+                              \/ Mode = "BodyOnly" /\ txs[pos] = "dep"
                               THEN IF /\ pos \notin journal
                                       \/ Mode = "FixedNoDedup"
                                       THEN /\ idxBal' = idxBal + 1
